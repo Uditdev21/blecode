@@ -1,0 +1,20 @@
+services:
+  tronn-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: tronn_data_sync_api
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    volumes:
+      # Persists TinyDB data file on the host machine
+      - ./data:/app/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
