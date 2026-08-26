@@ -2,6 +2,13 @@ import subprocess
 import json
 import re
 import sys
+import time
+import threading
+import requests
+
+
+API_URL = "http://localhost:8000/api/v1/data"
+TOKEN = "tronn_sec_token_889900"
 
 
 def parse_line(line):
@@ -68,6 +75,35 @@ def parse_line(line):
     return None
 
 
+def send_batch(batch):
+    if not batch:
+        return
+
+    payload = {
+        "ble": batch
+    }
+
+    try:
+        response = requests.post(
+            API_URL,
+            headers={
+                "token": TOKEN,
+                "Content-Type": "application/json"
+            },
+            json=payload,
+            timeout=5
+        )
+
+        print(
+            f"[API] Sent {len(batch)} events | "
+            f"HTTP {response.status_code}",
+            flush=True
+        )
+
+    except requests.RequestException as e:
+        print(f"[API ERROR] {e}", flush=True)
+
+
 def main():
 
     print("Starting bluetoothctl...", flush=True)
@@ -86,7 +122,6 @@ def main():
         bufsize=1
     )
 
-    # Give bluetoothctl commands
     process.stdin.write("power on\n")
     process.stdin.flush()
 
@@ -95,44 +130,86 @@ def main():
 
     print("Bluetooth scanning...", flush=True)
 
+    # Events collected during the current 1-second window
+    batch = []
+
+    # Next API send time
+    next_send = time.monotonic() + 1.0
+
     try:
 
         while True:
 
-            line = process.stdout.readline()
+            # bluetoothctl readline() can block.
+            # Use a short timeout by checking with select.
+            import select
 
-            if not line:
-                break
+            ready, _, _ = select.select(
+                [process.stdout],
+                [],
+                [],
+                0.1
+            )
 
-            # ALWAYS print original bluetoothctl output
-            print(line.rstrip(), flush=True)
+            if ready:
 
-            parsed = parse_line(line)
+                line = process.stdout.readline()
 
-            if parsed:
+                if not line:
+                    break
 
-                event = parsed["event"]
+                # ALWAYS print original bluetoothctl output
+                print(line.rstrip(), flush=True)
 
-                output = {
-                    "ble": {
-                        event: parsed
+                parsed = parse_line(line)
+
+                if parsed:
+
+                    event = parsed["event"]
+
+                    output = {
+                        "ble": {
+                            event: parsed
+                        }
                     }
-                }
 
-                # Print JSON
-                print(
-                    json.dumps(
-                        output,
-                        separators=(",", ":")
-                    ),
-                    flush=True
-                )
+                    # Print individual JSON event
+                    print(
+                        json.dumps(
+                            output,
+                            separators=(",", ":")
+                        ),
+                        flush=True
+                    )
+
+                    # Add to 1-second batch
+                    batch.append(parsed)
+
+            # Send every 1 second
+            now = time.monotonic()
+
+            if now >= next_send:
+
+                if batch:
+                    send_batch(batch)
+                    batch = []
+
+                # Keep timing stable
+                next_send += 1.0
+
+                # Prevent accumulated delay
+                if now >= next_send:
+                    next_send = now + 1.0
 
     except KeyboardInterrupt:
 
         print("\nStopping...", flush=True)
 
     finally:
+
+        # Send remaining events before shutting down
+        if batch:
+            send_batch(batch)
 
         try:
             process.stdin.write("scan off\n")
@@ -144,8 +221,11 @@ def main():
         except Exception:
             pass
 
-        process.terminate()
-        process.wait()
+        try:
+            process.terminate()
+            process.wait(timeout=2)
+        except Exception:
+            process.kill()
 
 
 if __name__ == "__main__":
