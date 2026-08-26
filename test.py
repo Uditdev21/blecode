@@ -9,18 +9,22 @@ import requests
 API_URL = "http://localhost:8000/api/v1/data"
 TOKEN = "tronn_sec_token_889900"
 
+running = True
 
-# Shared event buffer
 batch = []
 batch_lock = threading.Lock()
 
-running = True
-
 
 def parse_line(line):
-    line = line.rstrip()
+    line = line.strip()
 
+    # Ignore bluetoothctl prompt
+    if line == "[bluetoothctl]>":
+        return None
+
+    # ---------------------------------------------------------
     # NEW
+    # ---------------------------------------------------------
     m = re.match(
         r"^\[NEW\]\s+Device\s+([0-9A-Fa-f:]{17})\s*(.*)$",
         line
@@ -30,79 +34,114 @@ def parse_line(line):
         return {
             "event": "NEW",
             "address": m.group(1),
-            "data": m.group(2)
+            "data": m.group(2).strip()
         }
 
+    # ---------------------------------------------------------
     # CHG
+    # ---------------------------------------------------------
     m = re.match(
         r"^\[CHG\]\s+Device\s+([0-9A-Fa-f:]{17})\s+(.+)$",
         line
     )
 
     if m:
-        address = m.group(1)
-        change = m.group(2)
 
+        address = m.group(1)
+        change = m.group(2).strip()
+
+        # RSSI
+        rssi_match = re.match(
+            r"^RSSI:\s+0x[0-9a-fA-F]+\s+\((-?\d+)\)$",
+            change
+        )
+
+        if rssi_match:
+
+            return {
+                "event": "CHG",
+                "address": address,
+                "data": {
+                    "RSSI": int(rssi_match.group(1))
+                }
+            }
+
+        # Other CHG data
         if ":" in change:
+
             key, value = change.split(":", 1)
 
             key = key.strip()
             value = value.strip()
 
-            if key.upper() == "RSSI":
+            # Try to convert hexadecimal values
+            hex_match = re.match(
+                r"^0x([0-9a-fA-F]+)",
+                value
+            )
+
+            if hex_match:
+
                 try:
-                    value = int(value)
+                    value = int(
+                        hex_match.group(1),
+                        16
+                    )
                 except ValueError:
                     pass
 
-            data = {
-                key: value
-            }
-
-        else:
-            data = {
-                "raw": change
+            return {
+                "event": "CHG",
+                "address": address,
+                "data": {
+                    key: value
+                }
             }
 
         return {
             "event": "CHG",
             "address": address,
-            "data": data
+            "data": {
+                "raw": change
+            }
         }
 
+    # ---------------------------------------------------------
     # DEL
+    # ---------------------------------------------------------
     m = re.match(
         r"^\[DEL\]\s+Device\s+([0-9A-Fa-f:]{17})\s*(.*)$",
         line
     )
 
     if m:
+
         return {
             "event": "DEL",
             "address": m.group(1),
-            "data": m.group(2)
+            "data": m.group(2).strip()
         }
 
     return None
 
 
-def send_batch():
+def send_batch_loop():
 
-    global batch
+    global running
 
     while running:
 
-        # Wait exactly 1 second
+        # Wait one second
         time.sleep(1)
 
-        # Take current batch
+        # Get current events
         with batch_lock:
 
             if not batch:
                 continue
 
-            current_batch = batch
-            batch = []
+            current_batch = batch.copy()
+            batch.clear()
 
         payload = {
             "ble": current_batch
@@ -126,7 +165,7 @@ def send_batch():
             )
 
             print(
-                f"[API] HTTP {response.status_code}",
+                f"[API] Status: {response.status_code}",
                 flush=True
             )
 
@@ -135,15 +174,15 @@ def send_batch():
                 flush=True
             )
 
-        except requests.RequestException as e:
+        except Exception as e:
 
             print(
-                f"[API ERROR] {e}",
+                f"[API ERROR] {repr(e)}",
                 flush=True
             )
 
 
-def read_bluetooth(process):
+def bluetooth_reader(process):
 
     global running
 
@@ -152,39 +191,39 @@ def read_bluetooth(process):
         line = process.stdout.readline()
 
         if not line:
+            print(
+                "[BLE] bluetoothctl closed.",
+                flush=True
+            )
+            running = False
             break
 
-        # Print ORIGINAL bluetoothctl output
+        # Print original output
         print(
             line.rstrip(),
             flush=True
         )
 
-        # Parse BLE event
         parsed = parse_line(line)
 
         if parsed:
 
-            # Print parsed JSON
-            output = {
-                "ble": {
-                    parsed["event"]: parsed
-                }
-            }
-
+            # Print parsed event
             print(
                 json.dumps(
-                    output,
+                    {
+                        "ble": {
+                            parsed["event"]: parsed
+                        }
+                    },
                     separators=(",", ":")
                 ),
                 flush=True
             )
 
-            # Add event to batch
+            # Add to API batch
             with batch_lock:
                 batch.append(parsed)
-
-    running = False
 
 
 def main():
@@ -198,9 +237,6 @@ def main():
 
     process = subprocess.Popen(
         [
-            "stdbuf",
-            "-oL",
-            "-eL",
             "bluetoothctl"
         ],
         stdin=subprocess.PIPE,
@@ -210,13 +246,40 @@ def main():
         bufsize=1
     )
 
-    # Power on
+    # ---------------------------------------------------------
+    # Start API thread FIRST
+    # ---------------------------------------------------------
+
+    api_thread = threading.Thread(
+        target=send_batch_loop,
+        daemon=True
+    )
+
+    api_thread.start()
+
+    # ---------------------------------------------------------
+    # Start Bluetooth reader
+    # ---------------------------------------------------------
+
+    ble_thread = threading.Thread(
+        target=bluetooth_reader,
+        args=(process,),
+        daemon=True
+    )
+
+    ble_thread.start()
+
+    # ---------------------------------------------------------
+    # Bluetooth commands
+    # ---------------------------------------------------------
+
+    time.sleep(1)
+
     process.stdin.write("power on\n")
     process.stdin.flush()
 
     time.sleep(1)
 
-    # Start scanning
     process.stdin.write("scan on\n")
     process.stdin.flush()
 
@@ -225,27 +288,11 @@ def main():
         flush=True
     )
 
-    # Bluetooth reader thread
-    reader_thread = threading.Thread(
-        target=read_bluetooth,
-        args=(process,),
-        daemon=True
-    )
-
-    reader_thread.start()
-
-    # API sender thread
-    api_thread = threading.Thread(
-        target=send_batch,
-        daemon=True
-    )
-
-    api_thread.start()
-
     try:
 
         while running:
-            time.sleep(0.5)
+
+            time.sleep(1)
 
     except KeyboardInterrupt:
 
@@ -262,6 +309,8 @@ def main():
 
             process.stdin.write("scan off\n")
             process.stdin.flush()
+
+            time.sleep(0.2)
 
             process.stdin.write("quit\n")
             process.stdin.flush()
@@ -283,6 +332,7 @@ def main():
 
         # Send remaining events
         with batch_lock:
+
             remaining = batch.copy()
             batch.clear()
 
@@ -308,14 +358,14 @@ def main():
                 )
 
                 print(
-                    f"[API] Final HTTP {response.status_code}",
+                    f"[API] Final status: {response.status_code}",
                     flush=True
                 )
 
-            except requests.RequestException as e:
+            except Exception as e:
 
                 print(
-                    f"[API ERROR] {e}",
+                    f"[API ERROR] {repr(e)}",
                     flush=True
                 )
 
