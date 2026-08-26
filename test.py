@@ -1,4 +1,4 @@
-import subprocess
+import pexpect
 import json
 import re
 import time
@@ -9,34 +9,51 @@ import requests
 API_URL = "http://localhost:8000/api/v1/data"
 TOKEN = "tronn_sec_token_889900"
 
-batch = []
-batch_lock = threading.Lock()
 running = True
 
+batch = []
+batch_lock = threading.Lock()
+
+
+# ============================================================
+# PARSER
+# ============================================================
 
 def parse_line(line):
+
     line = line.strip()
 
     # Remove bluetoothctl prompt
-    line = re.sub(r"^\[bluetoothctl\]>\s*", "", line)
+    line = re.sub(
+        r"^\[bluetoothctl\]>\s*",
+        "",
+        line
+    )
 
     if not line:
         return None
 
+    # --------------------------------------------------------
     # NEW
+    # --------------------------------------------------------
+
     m = re.search(
         r"\[NEW\]\s+Device\s+([0-9A-Fa-f:]{17})\s*(.*)",
         line
     )
 
     if m:
+
         return {
             "event": "NEW",
             "address": m.group(1),
             "data": m.group(2).strip()
         }
 
+    # --------------------------------------------------------
     # CHG
+    # --------------------------------------------------------
+
     m = re.search(
         r"\[CHG\]\s+Device\s+([0-9A-Fa-f:]{17})\s+(.+)",
         line
@@ -84,7 +101,10 @@ def parse_line(line):
             }
         }
 
+    # --------------------------------------------------------
     # DEL
+    # --------------------------------------------------------
+
     m = re.search(
         r"\[DEL\]\s+Device\s+([0-9A-Fa-f:]{17})\s*(.*)",
         line
@@ -101,24 +121,32 @@ def parse_line(line):
     return None
 
 
+# ============================================================
+# API SENDER
+# ============================================================
+
 def api_sender():
 
     global running
+    global batch
 
     while running:
 
         time.sleep(1)
 
+        # Get events collected during this second
         with batch_lock:
 
-            events = batch.copy()
-            batch.clear()
+            events = batch
+            batch = []
 
         if not events:
+
             print(
                 "[API] 0 events",
                 flush=True
             )
+
             continue
 
         payload = {
@@ -126,7 +154,7 @@ def api_sender():
         }
 
         print(
-            f"[API] Sending {len(events)} events",
+            f"[API] Sending {len(events)} events...",
             flush=True
         )
 
@@ -155,93 +183,140 @@ def api_sender():
         except Exception as e:
 
             print(
-                f"[API ERROR] {e}",
+                f"[API ERROR] {type(e).__name__}: {e}",
                 flush=True
             )
 
+
+# ============================================================
+# MAIN
+# ============================================================
 
 def main():
 
     global running
 
     print(
-        "Starting bluetooth scan...",
+        "Starting bluetoothctl...",
         flush=True
     )
 
-    # ---------------------------------------------------------
-    # Start bluetoothctl in interactive mode
-    # ---------------------------------------------------------
+    # --------------------------------------------------------
+    # Start bluetoothctl with a REAL PTY
+    # --------------------------------------------------------
 
-    process = subprocess.Popen(
-        [
-            "bluetoothctl"
-        ],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        bufsize=1
+    child = pexpect.spawn(
+        "bluetoothctl",
+        encoding="utf-8",
+        timeout=1
     )
 
-    # ---------------------------------------------------------
-    # API thread
-    # ---------------------------------------------------------
+    # Print bluetoothctl output
+    child.logfile = None
 
-    threading.Thread(
+    # --------------------------------------------------------
+    # Start API thread
+    # --------------------------------------------------------
+
+    api_thread = threading.Thread(
         target=api_sender,
         daemon=True
-    ).start()
+    )
 
-    # ---------------------------------------------------------
-    # Commands
-    # ---------------------------------------------------------
+    api_thread.start()
 
-    time.sleep(1)
-
-    process.stdin.write("power on\n")
-    process.stdin.flush()
+    # --------------------------------------------------------
+    # Wait for bluetoothctl
+    # --------------------------------------------------------
 
     time.sleep(1)
 
-    process.stdin.write("scan on\n")
-    process.stdin.flush()
+    child.sendline("power on")
+
+    time.sleep(1)
+
+    child.sendline("scan on")
 
     print(
         "Bluetooth scanning...",
         flush=True
     )
 
+    # --------------------------------------------------------
+    # Read bluetoothctl continuously
+    # --------------------------------------------------------
+
+    buffer = ""
+
     try:
 
         while True:
 
-            line = process.stdout.readline()
+            try:
 
-            if not line:
-                break
+                # Read whatever bluetoothctl gives us
+                data = child.read_nonblocking(
+                    size=4096,
+                    timeout=0.2
+                )
 
-            # Print original
-            print(
-                line.rstrip(),
-                flush=True
-            )
+                if not data:
+                    continue
 
-            parsed = parse_line(line)
+                buffer += data
 
-            if parsed:
+                # Split into lines
+                while "\n" in buffer:
+
+                    line, buffer = buffer.split(
+                        "\n",
+                        1
+                    )
+
+                    line = line.strip()
+
+                    if not line:
+                        continue
+
+                    # Print original bluetoothctl output
+                    print(
+                        line,
+                        flush=True
+                    )
+
+                    # Parse
+                    parsed = parse_line(line)
+
+                    if parsed:
+
+                        # Print parsed event
+                        print(
+                            "[PARSED]",
+                            json.dumps(
+                                parsed,
+                                separators=(",", ":")
+                            ),
+                            flush=True
+                        )
+
+                        # Add to batch
+                        with batch_lock:
+                            batch.append(parsed)
+
+            except pexpect.TIMEOUT:
+
+                # Normal — just means no output
+                # during this 200ms period.
+                continue
+
+            except pexpect.EOF:
 
                 print(
-                    "[PARSED]",
-                    json.dumps(
-                        parsed,
-                        separators=(",", ":")
-                    ),
+                    "[BLE] bluetoothctl exited",
                     flush=True
                 )
 
-                with batch_lock:
-                    batch.append(parsed)
+                break
 
     except KeyboardInterrupt:
 
@@ -254,7 +329,10 @@ def main():
 
         running = False
 
+        # ----------------------------------------------------
         # Send remaining events
+        # ----------------------------------------------------
+
         with batch_lock:
 
             remaining = batch.copy()
@@ -263,7 +341,7 @@ def main():
         if remaining:
 
             print(
-                f"[API] Sending final {len(remaining)} events",
+                f"[API] Sending final {len(remaining)} events...",
                 flush=True
             )
 
@@ -282,7 +360,7 @@ def main():
                 )
 
                 print(
-                    f"[API] HTTP {response.status_code}",
+                    f"[API] Final HTTP {response.status_code}",
                     flush=True
                 )
 
@@ -293,28 +371,24 @@ def main():
                     flush=True
                 )
 
+        # ----------------------------------------------------
+        # Stop bluetoothctl
+        # ----------------------------------------------------
+
         try:
 
-            process.stdin.write("scan off\n")
-            process.stdin.flush()
+            child.sendline("scan off")
+            time.sleep(0.2)
 
-            process.stdin.write("quit\n")
-            process.stdin.flush()
+            child.sendline("quit")
+            time.sleep(0.5)
+
+            child.close(
+                force=True
+            )
 
         except Exception:
             pass
-
-        try:
-
-            process.terminate()
-            process.wait(timeout=2)
-
-        except Exception:
-
-            try:
-                process.kill()
-            except Exception:
-                pass
 
 
 if __name__ == "__main__":
