@@ -191,22 +191,18 @@ def api_sender():
 
     while running:
 
-        time.sleep(1)
+        # Collect BLE events for 2 seconds
+        time.sleep(2)
 
-        # Get current batch
         with batch_lock:
-
             events = batch
             batch = []
 
-        # Nothing to send
         if not events:
-
             print(
                 "[API] 0 events",
                 flush=True
             )
-
             continue
 
         payload = {
@@ -222,14 +218,11 @@ def api_sender():
 
             response = requests.post(
                 API_URL,
-
                 headers={
                     "token": TOKEN,
                     "Content-Type": "application/json"
                 },
-
                 json=payload,
-
                 timeout=5
             )
 
@@ -246,11 +239,9 @@ def api_sender():
         except Exception as e:
 
             print(
-                f"[API ERROR] "
-                f"{type(e).__name__}: {e}",
+                f"[API ERROR] {type(e).__name__}: {e}",
                 flush=True
             )
-
 
 # ============================================================
 # MAIN
