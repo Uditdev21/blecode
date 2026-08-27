@@ -282,3 +282,51 @@ def test_invalid_input_validation(client):
 
     invalid_offset = client.get("/api/v1/data/sync?offset=-1", headers=AUTH_HEADERS)
     assert invalid_offset.status_code == 422
+
+
+def test_corrupted_json_auto_recovery(client):
+    """
+    Tests that if a file has extra trailing bytes/corrupted data (JSONDecodeError),
+    SafeJSONStorage automatically repairs it and recovers valid records.
+    """
+    # Insert initial valid record
+    res = client.post("/api/v1/data", json={"test": "recover_me"}, headers=AUTH_HEADERS)
+    assert res.status_code == 201
+
+    # Simulate file corruption by appending garbage trailing bytes (extra data)
+    settings = get_settings()
+    db_path = settings.DB_PATH
+    with open(db_path, "a", encoding="utf-8") as f:
+        f.write(" trailing_garbage_extra_data_12345 {}}")
+
+    # Subsequent insert and read should not crash with JSONDecodeError, but auto-recover!
+    res2 = client.post("/api/v1/data", json={"test": "after_repair"}, headers=AUTH_HEADERS)
+    assert res2.status_code == 201
+
+    # Verify latest record is accessible
+    latest = client.get("/api/v1/data/latest", headers=AUTH_HEADERS)
+    assert latest.status_code == 200
+    assert latest.json()["data"]["test"] == "after_repair"
+
+
+def test_concurrent_inserts(client):
+    """
+    Simulates rapid concurrent requests to verify thread safety and absence of race conditions.
+    """
+    import concurrent.futures
+
+    def post_item(i):
+        return client.post("/api/v1/data", json={"worker_item": i}, headers=AUTH_HEADERS)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+        futures = [executor.submit(post_item, i) for i in range(25)]
+        results = [f.result() for f in futures]
+
+    for r in results:
+        assert r.status_code == 201
+
+    # Check that all 25 records are present
+    sync_res = client.get("/api/v1/data/sync", headers=AUTH_HEADERS)
+    assert sync_res.status_code == 200
+    assert sync_res.json()["count"] >= 25
+
