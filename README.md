@@ -92,6 +92,44 @@ python main.py
 uvicorn main:app --reload --host 0.0.0.0 --port 8000
 ```
 
+---
+
+### 3. Run the BLE Scanner (`test.py`)
+
+You can run the Bluetooth scanner in three ways:
+
+#### Option A: Direct Python Execution
+```powershell
+python test.py
+```
+
+#### Option B: Docker Scanner Container
+```bash
+# Build scanner image
+docker build -f Dockerfile.scanner -t tronn-ble-scanner .
+
+# Run scanner with host Bluetooth and D-Bus access (Linux)
+docker run -d --name tronn_ble_scanner --network host --privileged -v /var/run/dbus:/var/run/dbus tronn-ble-scanner
+```
+
+#### Option C: Linux Systemd Service (`tronn-ble-scanner.service`)
+```bash
+# 1. Copy service file
+sudo cp tronn-ble-scanner.service /etc/systemd/system/
+
+# 2. Reload daemon and enable on boot
+sudo systemctl daemon-reload
+sudo systemctl enable tronn-ble-scanner
+
+# 3. Start the service
+sudo systemctl start tronn-ble-scanner
+
+# 4. Check service status / logs
+sudo systemctl status tronn-ble-scanner
+journalctl -u tronn-ble-scanner -f
+```
+
+
 
 ---
 

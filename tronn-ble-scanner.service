@@ -1,0 +1,22 @@
+[Unit]
+Description=Tronn BLE Scanner Service (test.py)
+Documentation=https://tronn.io
+After=bluetooth.target network.target
+Requires=bluetooth.target
+
+[Service]
+Type=simple
+User=root
+# Set WorkingDirectory to your deployed devapi folder
+WorkingDirectory=/opt/tronn/devapi
+# Use virtualenv python or system python
+ExecStart=/opt/tronn/devapi/venv/bin/python test.py
+Restart=always
+RestartSec=5s
+Environment=PYTHONUNBUFFERED=1
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+

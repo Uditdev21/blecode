@@ -1,0 +1,26 @@
+FROM python:3.12-slim
+
+# Prevent Python from writing pyc files and buffering stdout/stderr
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+WORKDIR /app
+
+# Install BlueZ, D-Bus, and Bluetooth system utilities required by bluetoothctl
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    bluez \
+    bluez-tools \
+    dbus \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Python requirements for scanner
+RUN pip install --no-cache-dir \
+    pexpect>=4.9.0 \
+    requests>=2.31.0
+
+# Copy scanner script
+COPY test.py .
+
+# Start the BLE scanner
+CMD ["python", "test.py"]
+

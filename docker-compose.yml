@@ -18,3 +18,17 @@ services:
       timeout: 5s
       retries: 3
       start_period: 5s
+
+  ble-scanner:
+    build:
+      context: .
+      dockerfile: Dockerfile.scanner
+    container_name: tronn_ble_scanner
+    restart: unless-stopped
+    # Required on Linux for Bluetooth adapter and BlueZ D-Bus access
+    network_mode: host
+    privileged: true
+    volumes:
+      - /var/run/dbus:/var/run/dbus
+    depends_on:
+      - tronn-api
